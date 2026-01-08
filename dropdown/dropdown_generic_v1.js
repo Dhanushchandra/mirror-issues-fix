@@ -1,120 +1,256 @@
+/**
+ * --- CONFIGURATION CENTRAL ---
+ * All application-specific logic lives here.
+ */
 var _wfx_settings = _wfx_settings || {};
 
-var MANUAL_CONFIGS = [
-  {
-    inputSelector: '[id="js_2gx"]',
-    dropdownSelector: '[data-ownerid="js_2gx"]',
-    placement: "bottomCenter",
-    offsetX: 0,
-    offsetY: 0,
+var CONFIG = {
+  // 1. GLOBAL SETTINGS
+  settings: {
+    interval: 100, // Check every 100ms
+    timeout: 5000, // Stop checking after 5s
+
+    // Valid tags to attach to.
+    validInputTags: ["BUTTON", "INPUT", "DIV", "A", "SPAN", "ICON", "SVG"],
+
+    // How deep to look up for the floating wrapper of the dropdown
+    dropdownWrapperDepth: 30,
   },
-];
+
+  // 2. DISCOVERY RULES (The "Brain")
+  rules: [
+    // Rule 1: Standard ARIA Owns
+    {
+      name: "Standard ARIA Owns",
+      inputSelector: '[aria-expanded="true"][aria-owns]',
+      inputAttribute: "aria-owns",
+      dropdownAttribute: "id",
+      inputParentDepth: 0, // Use the element exactly as found
+    },
+
+    // Rule 2: Standard ARIA Controls
+    {
+      name: "Standard ARIA Controls",
+      inputSelector: '[aria-expanded="true"][aria-controls]',
+      inputAttribute: "aria-controls",
+      dropdownAttribute: "id",
+      inputParentDepth: 0,
+    },
+
+    // Rule 3: Example of DEPTH CONTROL
+    // Scenario: You select the Icon, but want to track the Button wrapper
+    // <button><icon data-target="menu1"></icon></button>
+    {
+      name: "Icon Trigger",
+      inputSelector: "icon[data-target], svg[data-target]",
+      inputAttribute: "data-target",
+      dropdownAttribute: "id",
+      inputParentDepth: 1, // <--- THIS MOVES SELECTION UP 1 LEVEL
+    },
+
+    // Rule 4: Custom Finder (Fluent UI)
+    {
+      name: "Simple Sibling Matcher",
+      inputSelector: ".my-simple-menu-btn",
+      mode: "custom",
+      finderFn: "nextSiblingFinder", // Uses the simple function below
+    },
+  ],
+
+  // 3. CUSTOM STRATEGIES
+  strategies: {
+    nextSiblingFinder: function (inputElement) {
+      var next = inputElement.nextElementSibling;
+      // Optional: Check if the next element looks like a dropdown
+      if (next && (next.tagName === "UL" || next.tagName === "DIV")) {
+        return next;
+      }
+      return null;
+    },
+  },
+
+  // 4. MANUAL OVERRIDES
+  manualPairs: [
+    {
+      inputSelector: '[id="js_2gx"]',
+      dropdownSelector: '[data-ownerid="js_2gx"]',
+      placement: "bottomCenter",
+      offsetX: 0,
+      offsetY: 0,
+    },
+  ],
+};
+
+// --- CORE ENGINE ---
 
 function fetchRequiredElements() {
   var findRequiredElementsInterval = setInterval(function () {
-    // A. Auto-Detect: ARIA and standard attributes
-    var foundAutoInputs = document.querySelectorAll(
-      '[aria-expanded="true"][aria-owns],[aria-expanded="true"][aria-controls]'
-    );
+    var allPairs = [];
 
-    // B. Manual-Detect: Check config list
-    var foundManualPairs = checkManualConfigs();
+    // A. PROCESS RULES
+    for (var r = 0; r < CONFIG.rules.length; r++) {
+      var rule = CONFIG.rules[r];
+      var foundInputs = document.querySelectorAll(rule.inputSelector);
 
-    if (foundAutoInputs.length > 0 || foundManualPairs.length > 0) {
-      clearInterval(findRequiredElementsInterval);
-      findRequiredElementsInterval = null;
+      // Filter & Normalize Inputs (Now handles DEPTH)
+      var validInputs = processFoundInputs(foundInputs, rule);
 
-      // 1. Process Auto-Detected
-      var inputElements = getInputElements(foundAutoInputs);
-      var drdnElements = getDrdnElements(inputElements);
-      console.log(inputElements);
-      console.log(drdnElements);
-      // Create a config array matching the auto-elements (filled with null)
-      var configs = [];
+      for (var i = 0; i < validInputs.length; i++) {
+        var input = validInputs[i];
 
-      for (var k = 0; k < inputElements.length; k++) {
-        configs.push(null);
-      }
+        // Find the partner Dropdown
+        var dropdown = findDropdownByRule(input, rule);
 
-      // 2. Process Manual Pairs (Add to the lists)
-      for (var m = 0; m < foundManualPairs.length; m++) {
-        inputElements.push(foundManualPairs[m].input);
-        drdnElements.push(foundManualPairs[m].dropdown);
-        configs.push(foundManualPairs[m].config);
-      }
+        if (dropdown) {
+          dropdown = findComponentWrapper(dropdown);
 
-      // 3. Find Scroll Parents (Critical: Based on INPUT)
-      var scrollableParentElements = findScrollableParentElems(inputElements);
-
-      for (var i = 0; i < inputElements.length; i++) {
-        var inputElem = inputElements[i];
-        var drdnElem = drdnElements[i];
-        var scrollableParentElement = scrollableParentElements[i];
-        var currentConfig = configs[i];
-
-        if (drdnElem && inputElem) {
-          // Initial Position
-          updateDropdownPosition(
-            inputElem,
-            drdnElem,
-            scrollableParentElement,
-            null,
-            currentConfig
-          );
-
-          // Listeners
-          if (scrollableParentElement && scrollableParentElement !== window) {
-            scrollableParentElement.addEventListener(
-              "scroll",
-              updateDropdownPosition.bind(
-                null,
-                inputElem,
-                drdnElem,
-                scrollableParentElement,
-                null,
-                currentConfig
-              )
-            );
+          // Pre-hide legacy check
+          if (dropdown.style.visibility !== "hidden") {
+            dropdown.style.visibility = "hidden";
           }
-          window.addEventListener(
-            "resize",
-            updateDropdownPosition.bind(
-              null,
-              inputElem,
-              drdnElem,
-              scrollableParentElement,
-              null,
-              currentConfig
-            )
-          );
+          allPairs.push({ input: input, dropdown: dropdown, config: null });
         }
       }
     }
-  }, 100);
+
+    // B. PROCESS MANUAL PAIRS
+    var manuals = checkManualConfigs();
+    for (var m = 0; m < manuals.length; m++) allPairs.push(manuals[m]);
+
+    // C. INITIALIZE FOUND PAIRS
+    if (allPairs.length > 0) {
+      clearInterval(findRequiredElementsInterval);
+
+      var inputList = [];
+      for (var p = 0; p < allPairs.length; p++)
+        inputList.push(allPairs[p].input);
+      var scrollParents = findScrollableParentElems(inputList);
+
+      for (var k = 0; k < allPairs.length; k++) {
+        var pair = allPairs[k];
+        var scrollParent = scrollParents[k];
+
+        // 1. Initial Latch
+        updateDropdownPosition(
+          pair.input,
+          pair.dropdown,
+          scrollParent,
+          pair.config
+        );
+
+        // 2. Add Listeners
+        if (scrollParent && scrollParent !== window) {
+          scrollParent.addEventListener(
+            "scroll",
+            updateDropdownPosition.bind(
+              null,
+              pair.input,
+              pair.dropdown,
+              scrollParent,
+              pair.config
+            )
+          );
+        }
+        window.addEventListener(
+          "resize",
+          updateDropdownPosition.bind(
+            null,
+            pair.input,
+            pair.dropdown,
+            scrollParent,
+            pair.config
+          )
+        );
+      }
+    }
+  }, CONFIG.settings.interval);
 
   setTimeout(function () {
-    if (findRequiredElementsInterval) {
+    if (findRequiredElementsInterval)
       clearInterval(findRequiredElementsInterval);
-      console.warn("Interval Timed Out - No active dropdowns found.");
-    }
-  }, 5000);
+  }, CONFIG.settings.timeout);
 }
-fetchRequiredElements();
 
-// --- HELPERS: DISCOVERY ---
+// --- HELPER: INPUT PROCESSOR (WITH DEPTH CONTROL) ---
+function processFoundInputs(nodeList, rule) {
+  var processed = [];
+  var validTags = CONFIG.settings.validInputTags;
+
+  // 1. Read Depth from Config (Default to 0)
+  var depth = rule.inputParentDepth || 0;
+
+  for (var i = 0; i < nodeList.length; i++) {
+    var el = nodeList[i];
+    var target = el;
+
+    // 2. Climb the DOM Tree based on depth
+    for (var d = 0; d < depth; d++) {
+      if (target.parentElement) {
+        target = target.parentElement;
+      }
+    }
+
+    // 3. Validation Check (Is the resulting target valid?)
+    if (validTags.indexOf(target.tagName) !== -1) {
+      processed.push(target);
+    }
+    // Auto-Fix: If target is invalid but parent is valid, grab parent (legacy logic)
+    else if (
+      target.parentElement &&
+      validTags.indexOf(target.parentElement.tagName) !== -1
+    ) {
+      processed.push(target.parentElement);
+    }
+  }
+  return processed;
+}
+
+// --- HELPER: DROPDOWN FINDER ---
+function findDropdownByRule(input, rule) {
+  // Mode 1: Custom Function
+  if (rule.mode === "custom") {
+    var fnName = rule.finderFn;
+    if (CONFIG.strategies[fnName]) {
+      return CONFIG.strategies[fnName](input);
+    }
+    return null;
+  }
+
+  // Mode 2: Attribute Match
+  // Note: We look at the ORIGINAL input element attributes if needed,
+  // but usually attributes are on the element we selected.
+  var matchValue = input.getAttribute(rule.inputAttribute);
+  if (!matchValue) return null;
+
+  var dropdown = null;
+  if (rule.dropdownAttribute === "id") {
+    dropdown = document.getElementById(matchValue);
+  } else {
+    var safeValue = matchValue.replace(/"/g, '\\"');
+    var selector = "[" + rule.dropdownAttribute + '="' + safeValue + '"]';
+    var candidates = document.querySelectorAll(selector);
+    for (var i = 0; i < candidates.length; i++) {
+      if (candidates[i] !== input) {
+        dropdown = candidates[i];
+        break;
+      }
+    }
+  }
+  return dropdown;
+}
+
+// --- STANDARD HELPERS ---
 
 function checkManualConfigs() {
   var pairs = [];
-  for (var i = 0; i < MANUAL_CONFIGS.length; i++) {
-    var conf = MANUAL_CONFIGS[i];
+  var manuals = CONFIG.manualPairs || [];
+  for (var i = 0; i < manuals.length; i++) {
+    var conf = manuals[i];
     var btn = document.querySelector(conf.inputSelector);
     var menu = document.querySelector(conf.dropdownSelector);
-
     if (btn && menu) {
-      // Ensure visible
       var style = window.getComputedStyle(menu);
       if (style.display !== "none" && style.visibility !== "hidden") {
-        // Use Wrapper Hunter on manual selectors too
         var realWrapper = findComponentWrapper(menu);
         pairs.push({ input: btn, dropdown: realWrapper, config: conf });
       }
@@ -123,131 +259,30 @@ function checkManualConfigs() {
   return pairs;
 }
 
-function getInputElements(foundElems) {
-  var inputElemsArray = [];
-  for (var i = 0; i < foundElems.length; i++) {
-    var foundElem = foundElems[i];
-    var inputElem = foundElem;
-    if (foundElem.tagName === "BUTTON" || foundElem.tagName === "INPUT") {
-      //   var parent = foundElem.parentElement;
-      var parent = foundElem;
-      if (parent && parent.offsetWidth - foundElem.offsetWidth < 30) {
-        inputElem = parent;
-      }
-    }
-    inputElemsArray.push(inputElem);
-  }
-  return inputElemsArray;
-}
-
-function getDrdnElements(inputElems) {
-  var drdnElemsArray = [];
-  for (var i = 0; i < inputElems.length; i++) {
-    var ariaOwns = inputElems[i].getAttribute("aria-owns");
-    var ariaControls = inputElems[i].getAttribute("aria-controls");
-    var btnId = inputElems[i].id;
-    var drdnElem;
-
-    if (ariaOwns) {
-      drdnElem = document.getElementById(ariaOwns);
-      if (!drdnElem)
-        drdnElem = customDrdnFinderFunction(inputElems[i], ariaOwns);
-    } else if (ariaControls) {
-      drdnElem = document.getElementById(ariaControls);
-    }
-
-    // Apply Wrapper Hunter to ensure we grab the popover container
-    if (drdnElem) {
-      drdnElem = findComponentWrapper(drdnElem);
-      // Hide initially to prevent flicker before latch
-      if (drdnElem.style.visibility !== "hidden")
-        drdnElem.style.visibility = "hidden";
-    }
-    drdnElemsArray.push(drdnElem);
-  }
-  return drdnElemsArray;
-}
-
-function customDrdnFinderFunction(inputElement, ariaOwnsValue) {
-  try {
-    var idPart = ariaOwnsValue.split("OverflowButton_")[1];
-    if (!idPart) return null;
-    var candidates = document.querySelectorAll('[id*="' + idPart + '"]');
-    for (var i = 0; i < candidates.length; i++) {
-      if (candidates[i].offsetWidth > 0 && candidates[i].offsetHeight > 0)
-        return candidates[i];
-    }
-  } catch (e) {
-    return null;
-  }
-  return null;
-}
-
-// --- HELPER: WRAPPER HUNTER ---
-// function findComponentWrapper(element) {
-//     var current = element;
-//     var count = 0;
-//     while (current && current !== document.body && count < 10) {
-//         // Detect common libraries (SAP UI5, Fluent, etc)
-//         if (current.classList.contains('sapMPopover') ||
-//             current.classList.contains('sapMDialog') ||
-//             current.classList.contains('sapMActionSheet') ||
-//             current.hasAttribute('data-sap-ui-popup')) {
-//             return current;
-//         }
-//         // Generic absolute container check
-//         var style = window.getComputedStyle(current);
-//         if (style.position === 'absolute' || style.position === 'fixed') {
-//             // Avoid stopping at the internal list <ul>
-//             if (!current.classList.contains('sapMList') && !current.classList.contains('sapMSelectList')) {
-//                 return current;
-//             }
-//         }
-//         current = current.parentElement;
-//         count++;
-//     }
-//     return element;
-// }
-
 function findComponentWrapper(element) {
   if (!element) return null;
+  var current = element;
+  var lastPotentialWrapper = element;
+  var depth = 0;
+  var maxDepth = CONFIG.settings.dropdownWrapperDepth;
 
-  let current = element;
-  let lastPotentialWrapper = element;
-  let depth = 0;
-  const MAX_DEPTH = 30; // Increased to handle deep React/Vue trees
-
-  while (current && current !== document.body && depth < MAX_DEPTH) {
-    const style = window.getComputedStyle(current);
-    const isFloating =
+  while (current && current !== document.body && depth < maxDepth) {
+    var style = window.getComputedStyle(current);
+    var isFloating =
       style.position === "absolute" || style.position === "fixed";
-    const hasLayering = parseInt(style.zIndex) > 0;
-    const isFlexOrGrid = style.display === "flex" || style.display === "grid";
-
-    // LOGIC: A wrapper is usually the HIGHEST element in a local tree
-    // that still behaves like a container.
+    var hasLayering = parseInt(style.zIndex) > 0;
     if (isFloating || hasLayering) {
       lastPotentialWrapper = current;
-
-      // If we hit a fixed/absolute element that is a direct child of
-      // the body or a very high-level container, it's definitely the wrapper.
-      if (current.parentElement === document.body) {
-        return current;
-      }
+      if (current.parentElement === document.body) return current;
     }
-
-    // Framework signal: many frameworks use data-attributes for roots
     if (
       current.hasAttribute("data-v-root") ||
       current.hasAttribute("data-reactroot")
-    ) {
+    )
       return current;
-    }
-
     current = current.parentElement;
     depth++;
   }
-
   return lastPotentialWrapper;
 }
 
@@ -272,7 +307,7 @@ function findScrollableParentElems(inputElems) {
   return parents;
 }
 
-// --- CORE: POSITION & UPDATE ---
+// --- CORE: POSITION & UPDATE (With 90% Visibility & Safe Clipping) ---
 
 function updateDropdownPosition(
   inputElement,
@@ -282,27 +317,27 @@ function updateDropdownPosition(
 ) {
   if (!inputElement || !drdnElement) return;
 
-  // 1. Reset and Prepare
+  // 1. Reset
   drdnElement.style.position = "fixed";
   drdnElement.style.zIndex = "999999";
   drdnElement.style.display = "block";
   drdnElement.style.visibility = "hidden";
   drdnElement.style.margin = "0";
 
-  // 2. Detect Parent Displacement
+  // 2. Calibration
   drdnElement.style.top = "0px";
   drdnElement.style.left = "0px";
   var offsetTest = drdnElement.getBoundingClientRect();
   var parentShiftY = offsetTest.top;
   var parentShiftX = offsetTest.left;
 
-  // 3. Measure target and viewport
+  // 3. Measure
   var inputRect = inputElement.getBoundingClientRect();
   var drdnRect = drdnElement.getBoundingClientRect();
   var viewH = window.innerHeight;
   var viewW = window.innerWidth;
 
-  // 4. Calculate Coordinates
+  // 4. Coordinates
   var vPos = config?.placement?.includes("top") ? "top" : "bottom";
   if (vPos === "bottom" && viewH - inputRect.bottom < drdnRect.height)
     vPos = "top";
@@ -324,43 +359,35 @@ function updateDropdownPosition(
     targetLeft = viewW - drdnRect.width - 10;
   if (targetLeft < 10) targetLeft = 10;
 
-  // 5. Apply Final Position
+  // 5. Apply
   drdnElement.style.top = targetTop - parentShiftY + "px";
   drdnElement.style.left = targetLeft - parentShiftX + "px";
 
-  // --- 6. LOGIC: 90% VISIBILITY CHECK & CLIPPING ---
+  // 6. 90% Visibility & Clipping
   if (scrollParent && scrollParent !== window) {
     var pRect = scrollParent.getBoundingClientRect();
 
-    // A. CALCULATE INTERSECTION AREA (Input vs ScrollParent)
-    // 1. Find the overlapping rectangle coordinates
+    // Intersection Math
     var overlapLeft = Math.max(inputRect.left, pRect.left);
     var overlapTop = Math.max(inputRect.top, pRect.top);
     var overlapRight = Math.min(inputRect.right, pRect.right);
     var overlapBottom = Math.min(inputRect.bottom, pRect.bottom);
 
-    // 2. Calculate dimensions of the overlap (clamped to 0 if no overlap)
     var overlapW = Math.max(0, overlapRight - overlapLeft);
     var overlapH = Math.max(0, overlapBottom - overlapTop);
 
-    // 3. Calculate Areas
     var visibleArea = overlapW * overlapH;
     var totalInputArea = inputRect.width * inputRect.height;
-
-    // 4. Calculate Ratio (0.0 to 1.0)
     var visibilityRatio = totalInputArea > 0 ? visibleArea / totalInputArea : 0;
 
-    // B. DECISION: Is at least 90% visible?
     if (visibilityRatio < 0.9) {
-      // Less than 90% visible -> Hide completely
       drdnElement.style.opacity = "0";
       drdnElement.style.pointerEvents = "none";
     } else {
-      // 90% or more visible -> Show
       drdnElement.style.opacity = "1";
       drdnElement.style.pointerEvents = "auto";
 
-      // C. APPLY CLIPPING (Polishing the edges)
+      // Visual Clip
       var clipTop = Math.max(0, pRect.top - targetTop);
       var clipBottom = Math.max(0, targetTop + drdnRect.height - pRect.bottom);
       var clipLeft = Math.max(0, pRect.left - targetLeft);
@@ -385,67 +412,18 @@ function updateDropdownPosition(
       }
     }
   } else {
-    // No scroll parent context -> Always visible
     drdnElement.style.opacity = "1";
     drdnElement.style.pointerEvents = "auto";
     drdnElement.style.clipPath = "none";
   }
 
-  // 7. Initial Latch
+  // 7. Latch
   if (drdnElement.getAttribute("data-latched") !== "true") {
     drdnElement.setAttribute("data-latched", "true");
     setTimeout(function () {
       updateDropdownPosition(inputElement, drdnElement, scrollParent, config);
     }, 0);
   }
-
   drdnElement.style.visibility = "visible";
 }
-
-function calculateDropdownPosition(
-  targetElement,
-  dropdownElement,
-  preferredPlacement
-) {
-  var targetRect = targetElement.getBoundingClientRect();
-  var dropdownRect = dropdownElement.getBoundingClientRect();
-  var viewportWidth = window.innerWidth;
-  var viewportHeight = window.innerHeight;
-
-  var dropdownHeight = dropdownRect.height;
-  var dropdownWidth = dropdownRect.width;
-
-  var spaceAbove = targetRect.top;
-  var spaceBelow = viewportHeight - targetRect.bottom;
-
-  // Defaults
-  var vPos = "bottom";
-  var hPos = "left";
-
-  // 1. Manual Override
-  if (preferredPlacement) {
-    var p = preferredPlacement.toLowerCase();
-    if (p.indexOf("top") !== -1) vPos = "top";
-    if (p.indexOf("center") !== -1) hPos = "center";
-    if (p.indexOf("right") !== -1) hPos = "right";
-    return { vPos: vPos, hPos: hPos };
-  }
-
-  // 2. Auto-Logic (Vertical)
-  if (dropdownHeight > spaceAbove && dropdownHeight > spaceBelow) {
-    vPos = "center";
-  } else if (spaceBelow < dropdownHeight && spaceAbove >= dropdownHeight) {
-    vPos = "top";
-  }
-
-  // 3. Auto-Logic (Horizontal)
-  if (targetRect.left + dropdownWidth > viewportWidth) {
-    if (targetRect.right - dropdownWidth >= 0) {
-      hPos = "right";
-    } else {
-      hPos = "center";
-    }
-  }
-
-  return { vPos: vPos, hPos: hPos };
-}
+fetchRequiredElements();
