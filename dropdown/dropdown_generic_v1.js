@@ -15,6 +15,20 @@ var CONFIG = {
 
     // How deep to look up for the floating wrapper of the dropdown
     dropdownWrapperDepth: 30,
+
+    // [NEW] KNOWN WRAPPER CLASSES/SELECTORS
+    // If an element matches one of these, we stop looking up and accept it as the wrapper.
+    commonWrapperSelectors: [
+      ".sapMPopover", // SAP UI5 Popover
+      ".sapMDialog", // SAP UI5 Dialog
+      ".sapMActionSheet", // SAP UI5 Action Sheet
+      "[data-sap-ui-popup]", // Generic SAP Popup
+      ".ms-ContextualMenu-Callout", // Microsoft Fluent UI (Legacy)
+      ".fui-MenuPopover", // Microsoft Fluent UI (New)
+      ".MuiPopover-root", // Material UI
+      '[role="dialog"]', // Generic ARIA Dialog
+      '[role="menu"]', // Generic ARIA Menu
+    ],
   },
 
   // 2. DISCOVERY RULES (The "Brain")
@@ -25,7 +39,7 @@ var CONFIG = {
       inputSelector: '[aria-expanded="true"][aria-owns]',
       inputAttribute: "aria-owns",
       dropdownAttribute: "id",
-      inputParentDepth: 0, // Use the element exactly as found
+      inputParentDepth: 0,
     },
 
     // Rule 2: Standard ARIA Controls
@@ -38,14 +52,12 @@ var CONFIG = {
     },
 
     // Rule 3: Example of DEPTH CONTROL
-    // Scenario: You select the Icon, but want to track the Button wrapper
-    // <button><icon data-target="menu1"></icon></button>
     {
       name: "Icon Trigger",
       inputSelector: "icon[data-target], svg[data-target]",
       inputAttribute: "data-target",
       dropdownAttribute: "id",
-      inputParentDepth: 1, // <--- THIS MOVES SELECTION UP 1 LEVEL
+      inputParentDepth: 1,
     },
 
     // Rule 4: Custom Finder (Fluent UI)
@@ -53,7 +65,7 @@ var CONFIG = {
       name: "Simple Sibling Matcher",
       inputSelector: ".my-simple-menu-btn",
       mode: "custom",
-      finderFn: "nextSiblingFinder", // Uses the simple function below
+      finderFn: "nextSiblingFinder",
     },
   ],
 
@@ -61,7 +73,6 @@ var CONFIG = {
   strategies: {
     nextSiblingFinder: function (inputElement) {
       var next = inputElement.nextElementSibling;
-      // Optional: Check if the next element looks like a dropdown
       if (next && (next.tagName === "UL" || next.tagName === "DIV")) {
         return next;
       }
@@ -92,7 +103,7 @@ function fetchRequiredElements() {
       var rule = CONFIG.rules[r];
       var foundInputs = document.querySelectorAll(rule.inputSelector);
 
-      // Filter & Normalize Inputs (Now handles DEPTH)
+      // Filter & Normalize Inputs
       var validInputs = processFoundInputs(foundInputs, rule);
 
       for (var i = 0; i < validInputs.length; i++) {
@@ -171,31 +182,25 @@ function fetchRequiredElements() {
   }, CONFIG.settings.timeout);
 }
 
-// --- HELPER: INPUT PROCESSOR (WITH DEPTH CONTROL) ---
+// --- HELPER: INPUT PROCESSOR ---
 function processFoundInputs(nodeList, rule) {
   var processed = [];
   var validTags = CONFIG.settings.validInputTags;
-
-  // 1. Read Depth from Config (Default to 0)
   var depth = rule.inputParentDepth || 0;
 
   for (var i = 0; i < nodeList.length; i++) {
     var el = nodeList[i];
     var target = el;
 
-    // 2. Climb the DOM Tree based on depth
     for (var d = 0; d < depth; d++) {
       if (target.parentElement) {
         target = target.parentElement;
       }
     }
 
-    // 3. Validation Check (Is the resulting target valid?)
     if (validTags.indexOf(target.tagName) !== -1) {
       processed.push(target);
-    }
-    // Auto-Fix: If target is invalid but parent is valid, grab parent (legacy logic)
-    else if (
+    } else if (
       target.parentElement &&
       validTags.indexOf(target.parentElement.tagName) !== -1
     ) {
@@ -207,7 +212,6 @@ function processFoundInputs(nodeList, rule) {
 
 // --- HELPER: DROPDOWN FINDER ---
 function findDropdownByRule(input, rule) {
-  // Mode 1: Custom Function
   if (rule.mode === "custom") {
     var fnName = rule.finderFn;
     if (CONFIG.strategies[fnName]) {
@@ -216,9 +220,6 @@ function findDropdownByRule(input, rule) {
     return null;
   }
 
-  // Mode 2: Attribute Match
-  // Note: We look at the ORIGINAL input element attributes if needed,
-  // but usually attributes are on the element we selected.
   var matchValue = input.getAttribute(rule.inputAttribute);
   if (!matchValue) return null;
 
@@ -259,6 +260,7 @@ function checkManualConfigs() {
   return pairs;
 }
 
+// [UPDATED] WRAPPER HUNTER WITH CONFIG SUPPORT
 function findComponentWrapper(element) {
   if (!element) return null;
   var current = element;
@@ -266,20 +268,35 @@ function findComponentWrapper(element) {
   var depth = 0;
   var maxDepth = CONFIG.settings.dropdownWrapperDepth;
 
+  // Read known selectors from config
+  var commonSelectors = CONFIG.settings.commonWrapperSelectors || [];
+
   while (current && current !== document.body && depth < maxDepth) {
+    // 1. Check Known Wrappers (Defined in Config)
+    // If it matches a known class/attribute, we trust it immediately.
+    for (var i = 0; i < commonSelectors.length; i++) {
+      if (current.matches && current.matches(commonSelectors[i])) {
+        return current;
+      }
+    }
+
+    // 2. Generic Heuristics
     var style = window.getComputedStyle(current);
     var isFloating =
       style.position === "absolute" || style.position === "fixed";
     var hasLayering = parseInt(style.zIndex) > 0;
+
     if (isFloating || hasLayering) {
       lastPotentialWrapper = current;
       if (current.parentElement === document.body) return current;
     }
+
     if (
       current.hasAttribute("data-v-root") ||
       current.hasAttribute("data-reactroot")
     )
       return current;
+
     current = current.parentElement;
     depth++;
   }
